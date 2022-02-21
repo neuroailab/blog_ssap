@@ -13,9 +13,9 @@ RAFT_DIR = os.path.expanduser("~/RAFT-TDW/")
 sys.path.append(RAFT_DIR)
 sys.path.append(os.path.join(RAFT_DIR, 'core'))
 
-from train import get_args
-from raft import RAFT
-
+import train
+import raft
+from datasets import TdwFlowDataset
 
 def preprocess(img):
     """preprocess
@@ -161,7 +161,7 @@ class Mydatasets(torch.utils.data.Dataset):
 
         return out_data, out_t, out_t_aff
 
-class TdwAffinityDataset(tdw.TdwDataset):
+class TdwAffinityDataset(TdwFlowDataset):
 
     def __init__(self, aff_r, num_levels=5, *args, **kwargs):
 
@@ -169,29 +169,23 @@ class TdwAffinityDataset(tdw.TdwDataset):
         self.aff_r = aff_r
         self.K = self.aff_r**2
         self.num_levels = num_levels
+        self.is_test = False
 
     def __getitem__(self, idx):
 
-        tensors = super(TdwAffinityDataset, self).__getitem__(idx)
-        print(tensors.keys())
-        for k,t in tensors.items():
-            if isinstance(t, torch.Tensor):
-                print(k, t.dtype, t.shape)
-        return tensors
+        img1, img2, _, _ = super().__getitem__(idx)
+        return (img1, img2)
 
 if __name__ == '__main__':
 
-    # dataset = TdwAffinityDataset(
-    #     aff_r=5,
-    #     dataset_dir='/data5/dbear/tdw_datasets/playroom_large_v3copy/',
-    #     dataset_names=None,
-    #     sequence_length=2,
-    #     start_frame=5,
-    #     min_frame=5
-    # )
-    # print(len(dataset))
-    # inp = dataset[0]
+    dataset = TdwAffinityDataset(
+        aff_r=5,
+        root='/data5/dbear/tdw_datasets/playroom_large_v3copy/',
+        filepattern="*[0-8]"
+    )
+    print(len(dataset))
+    inp = dataset[0]
 
-    args = get_args("")
-    net = RAFT(args)
+    args = train.get_args("")
+    net = train.RAFT(args)
     print(net)
