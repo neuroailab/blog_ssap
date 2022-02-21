@@ -8,7 +8,7 @@ import dorsalventral.data.tdw as tdw
 import dorsalventral.data.utils as data_utils
 
 ## RAFT
-import os, sys
+import os, sys, copy
 RAFT_DIR = os.path.expanduser("~/RAFT-TDW/")
 sys.path.append(RAFT_DIR)
 sys.path.append(os.path.join(RAFT_DIR, 'core'))
@@ -163,29 +163,73 @@ class Mydatasets(torch.utils.data.Dataset):
 
 class TdwAffinityDataset(TdwFlowDataset):
 
-    def __init__(self, aff_r, num_levels=5, *args, **kwargs):
+    def __init__(self, aff_r, num_levels=5,
+                 raft_ckpt=os.path.join(RAFT_DIR, 'models', 'raft-sintel.pth'),
+                 raft_args={'test_mode': True, 'iters': 24},
+                 full_supervision=False,
+                 flow_thresh=0.5,
+                 *args, **kwargs):
 
-        super(TdwAffinityDataset, self).__init__(*args, **kwargs)
+        super(TdwAffinityDataset, self).__init__(
+            get_gt_segments=True,
+            *args, **kwargs)
         self.aff_r = aff_r
         self.K = self.aff_r**2
         self.num_levels = num_levels
         self.is_test = False
 
+        self.raft = self._load_raft(raft_ckpt)
+        self.raft_args = copy.deepcopy(raft_args)
+
+        self.full_supervision = full_supervision
+        self.flow_thresh = flow_thresh
+
+    def _load_raft(self, ckpt):
+        if ckpt is None:
+            return None
+        raft = train.load_model(
+            load_path=ckpt,
+            smalle=False,
+            cuda=True,
+            train=False)
+        return raft
+
+    def _get_foreground(self, flow):
+
+        flow_mag = flow.float().square().sum(-3, True).sqrt()
+        is_moving = (flow_mag > self.flow_thresh).float()
+        return is_moving
+
     def __getitem__(self, idx):
 
-        img1, img2, _, _ = super().__getitem__(idx)
-        return (img1, img2)
+        img1, img2, flow, gt_segments = super().__getitem__(idx)
+        print("segments", gt_segments.dtype, gt_segments.shape)
+        if self.raft is not None:
+            _, flow = self.raft(
+                img1[None].cuda(), img2[None].cuda(),
+                **self.raft_args)
+            flow = flow.squeeze(0) # remove batch dim
+            print("raft flow", flow.shape)
+
+        foreground = self._get_foreground(flow if not self.full_supervision else gt_segments)
+        print("foreground", foreground.shape)
+        print("images", img1.shape, img2.shape)
+
+
+
+        # return image, segments, affinities
+        return (img1, foreground, None)
 
 if __name__ == '__main__':
 
     dataset = TdwAffinityDataset(
         aff_r=5,
         root='/data5/dbear/tdw_datasets/playroom_large_v3copy/',
-        filepattern="*[0-8]"
+        filepattern="*[0-8]",
+        raft_ckpt=None
     )
     print(len(dataset))
     inp = dataset[0]
 
     args = train.get_args("")
     net = train.RAFT(args)
-    print(net)
