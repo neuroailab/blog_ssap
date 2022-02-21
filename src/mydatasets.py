@@ -4,6 +4,17 @@ import numpy as np
 from PIL import Image
 import torch
 import torchvision.transforms as transforms
+import dorsalventral.data.tdw as tdw
+import dorsalventral.data.utils as data_utils
+
+## RAFT
+import os, sys
+RAFT_DIR = os.path.expanduser("~/RAFT-TDW/")
+sys.path.append(RAFT_DIR)
+sys.path.append(os.path.join(RAFT_DIR, 'core'))
+
+from train import get_args
+from raft import RAFT
 
 
 def preprocess(img):
@@ -149,3 +160,38 @@ class Mydatasets(torch.utils.data.Dataset):
             out_t_aff[mul, :, 0:img_size, 0:img_size] = aff_data
 
         return out_data, out_t, out_t_aff
+
+class TdwAffinityDataset(tdw.TdwDataset):
+
+    def __init__(self, aff_r, num_levels=5, *args, **kwargs):
+
+        super(TdwAffinityDataset, self).__init__(*args, **kwargs)
+        self.aff_r = aff_r
+        self.K = self.aff_r**2
+        self.num_levels = num_levels
+
+    def __getitem__(self, idx):
+
+        tensors = super(TdwAffinityDataset, self).__getitem__(idx)
+        print(tensors.keys())
+        for k,t in tensors.items():
+            if isinstance(t, torch.Tensor):
+                print(k, t.dtype, t.shape)
+        return tensors
+
+if __name__ == '__main__':
+
+    # dataset = TdwAffinityDataset(
+    #     aff_r=5,
+    #     dataset_dir='/data5/dbear/tdw_datasets/playroom_large_v3copy/',
+    #     dataset_names=None,
+    #     sequence_length=2,
+    #     start_frame=5,
+    #     min_frame=5
+    # )
+    # print(len(dataset))
+    # inp = dataset[0]
+
+    args = get_args("")
+    net = RAFT(args)
+    print(net)
