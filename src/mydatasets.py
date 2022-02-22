@@ -228,20 +228,85 @@ class Mydatasets(torch.utils.data.Dataset):
 class TdwAffinityDataset(Dataset):
     def __init__(self,
                  dataset_dir='/mnt/fs6/honglinc/dataset/tdw_playroom_small/',
+                 aff_r=5,
+                 num_levels=5,
                  training=True,
+                 size=[256, 256],
+                 splits='[0-9]*',
+                 test_splits='[0-3]',
+                 filepattern='*[0-8]',
+                 test_filepattern='*9',
                  delta_time=1,
-                 frame_idx=5):
+                 frame_idx=5,
+                 raft_ckpt=os.path.join(RAFT_DIR, 'models', 'raft-sintel.pth'),
+                 raft_args={'test_mode': True, 'iters': 20},
+                 flow_thresh=0.5,
+                 full_supervision=False
+    ):
         self.training = training
         self.frame_idx = frame_idx
         self.delta_time = delta_time
+
+        self.aff_r = aff_r
+        self.num_levels = num_levels
 
         meta_path = os.path.join(dataset_dir, 'meta.json')
         self.meta = json.loads(Path(meta_path).open().read())
 
         if self.training:
-            self.file_list = glob.glob(os.path.join(dataset_dir, 'images', 'model_split_[0-9]*', '*[0-8]'))
+            self.file_list = glob.glob(os.path.join(dataset_dir, 'images',
+                                                    'model_split_'+splits,
+                                                    filepattern))
         else:
-            self.file_list = glob.glob(os.path.join(dataset_dir, 'images', 'model_split_[0-3]', '*9'))
+            self.file_list = glob.glob(os.path.join(dataset_dir, 'images',
+                                                    'model_split_'+test_splits,
+                                                    test_filepattern))
+
+        self.raft = self._load_raft(raft_ckpt)
+        self.raft_args = copy.deepcopy(raft_args)
+        self.flow_thresh = flow_thresh
+
+        ## resizing
+        self.size = size
+        if self.size is None:
+            self.resize = self.resize_labels = nn.Identity()
+        else:
+            self.resize = transforms.Resize(self.size)
+            self.resize_labels = transforms.Resize(self.size,
+                                                   interpolation=transforms.InterpolationMode.NEAREST)
+
+
+        ## how to get supervision inputs
+        self.full_supervision = full_supervision
+
+    def _load_raft(self, ckpt):
+        if ckpt is None:
+            return None
+        raft = train.load_model(
+            load_path=ckpt,
+            small=False,
+            cuda=True,
+            train=False)
+        return raft
+
+    def get_raft_flow(self, img1, img2):
+        assert self.raft is not None
+        _, pred_flow = self.raft(img1[None].cuda().float(), img2[None].cuda().float(),
+                                 **self.raft_args)
+        return pred_flow
+
+    def get_raft_mask(self, img1, img2):
+        pred_flow = self.get_raft_flow(img1, img2)
+        pred_mask = (pred_flow.square().sum(-3).sqrt() > self.flow_thresh)
+        if len(pred_mask.shape) == 3:
+            pred_mask = pred_mask[0]
+        return pred_mask
+
+    def get_semantic_map(self, motion_mask):
+        """Only two categories: foreground (i.e. moving or moveable) and background"""
+        size = motion_mask.shape[-2:]
+        cats = torch.arange(2, dtype=torch.long, device=motion_mask.device).view(2,1,1)
+        return (cats == motion_mask.view(1, *size).long()).float()
 
     def __len__(self):
         return len(self.file_list)
@@ -257,7 +322,52 @@ class TdwAffinityDataset(Dataset):
         segment_colors = self.read_frame(file_name.replace('/images/', '/objects/'), frame_idx=self.frame_idx)
         _, segment_map, gt_moving = self.process_segmentation_color(segment_colors, file_name)
 
-        return image_1, image_2, segment_map, gt_moving
+        if self.full_supervision:
+            pass
+
+        self.precomputed_raft = False
+        if self.precomputed_raft:
+            pass
+        elif self.raft is not None:
+            moving = self.get_raft_mask(image_1, image_2)
+        else:
+            moving = gt_moving
+
+        semantic = self.get_semantic_map(moving)
+        aff_target = self.get_affinity_target(moving)
+
+        return (self.resize(image_1), self.resize_labels(semantic), aff_target)
+
+    def get_affinity_target(self, segments):
+        assert len(segments.shape) == 2, segments.shape
+        segments = self.resize_labels(segments[None])[0] # [H,W] <long>
+
+        aff_targets = torch.zeros((self.num_levels, self.aff_r**2, self.size[0], self.size[1])).float()
+        for lev in range(self.num_levels):
+            segs_lev = segments[0:self.size[0]:2**lev,
+                                0:self.size[1]:2**lev]
+            size = [self.size[0] // (2**lev), self.size[1] // (2**lev)]
+
+            segs_aff_lev_2_pix = torch.zeros((size[0] + (self.aff_r//2)*2,
+                                              size[1] + (self.aff_r//2)*2)).long()
+            segs_aff_lev_2_pix[self.aff_r//2:
+                               size[0]+self.aff_r//2,
+                               self.aff_r//2:
+                               size[1]+self.aff_r//2] = segs_lev
+
+            segs_aff_compare = torch.zeros((self.aff_r**2, size[0], size[1])).long()
+
+            ## set affinity values
+            for i in range(self.aff_r):
+                for j in range(self.aff_r):
+                    segs_aff_compare[i*self.aff_r + j] = segs_aff_lev_2_pix[i:i+size[0],
+                                                                            j:j+size[1]]
+
+            ## compare
+            aff_t = (segs_lev[None] == segs_aff_compare).float()
+            aff_targets[lev, :, 0:size[0], 0:size[1]] = aff_t
+
+        return aff_targets.to(segments.device)
 
     @staticmethod
     def read_frame(path, frame_idx):
@@ -297,8 +407,10 @@ class TdwAffinityDataset(Dataset):
 if __name__ == '__main__':
 
     dataset = TdwAffinityDataset(
-        # raft_ckpt=None
+        raft_ckpt=None,
+        training=False
     )
+
     print(len(dataset))
     inp = dataset[0]
     for v in inp:
