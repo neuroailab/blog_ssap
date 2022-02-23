@@ -166,70 +166,11 @@ class Mydatasets(torch.utils.data.Dataset):
 
         return out_data, out_t, out_t_aff
 
-# class TdwAffinityDataset(TdwFlowDataset):
-
-#     def __init__(self, aff_r, num_levels=5,
-#                  raft_ckpt=os.path.join(RAFT_DIR, 'models', 'raft-sintel.pth'),
-#                  raft_args={'test_mode': True, 'iters': 24},
-#                  full_supervision=False,
-#                  flow_thresh=0.5,
-#                  *args, **kwargs):
-
-#         super(TdwAffinityDataset, self).__init__(
-#             get_gt_segments=True,
-#             *args, **kwargs)
-#         self.aff_r = aff_r
-#         self.K = self.aff_r**2
-#         self.num_levels = num_levels
-#         self.is_test = False
-
-#         self.raft = self._load_raft(raft_ckpt)
-#         self.raft_args = copy.deepcopy(raft_args)
-
-#         self.full_supervision = full_supervision
-#         self.flow_thresh = flow_thresh
-
-#     def _load_raft(self, ckpt):
-#         if ckpt is None:
-#             return None
-#         raft = train.load_model(
-#             load_path=ckpt,
-#             smalle=False,
-#             cuda=True,
-#             train=False)
-#         return raft
-
-#     def _get_foreground(self, flow):
-
-#         flow_mag = flow.float().square().sum(-3, True).sqrt()
-#         is_moving = (flow_mag > self.flow_thresh).float()
-#         return is_moving
-
-#     def __getitem__(self, idx):
-
-#         img1, img2, flow, gt_segments = super().__getitem__(idx)
-#         print("segments", gt_segments.dtype, gt_segments.shape)
-#         if self.raft is not None:
-#             _, flow = self.raft(
-#                 img1[None].cuda(), img2[None].cuda(),
-#                 **self.raft_args)
-#             flow = flow.squeeze(0) # remove batch dim
-#             print("raft flow", flow.shape)
-
-#         foreground = self._get_foreground(flow if not self.full_supervision else gt_segments)
-#         print("foreground", foreground.shape)
-#         print("images", img1.shape, img2.shape)
-
-
-
-#         # return image, segments, affinities
-#         return (img1, foreground, None)
 
 class TdwAffinityDataset(Dataset):
     def __init__(self,
                  dataset_dir='/mnt/fs6/honglinc/dataset/tdw_playroom_small/',
                  aff_r=5,
-                 num_levels=5,
                  training=True,
                  size=[256, 256],
                  splits='[0-9]*',
@@ -241,14 +182,17 @@ class TdwAffinityDataset(Dataset):
                  raft_ckpt=os.path.join(RAFT_DIR, 'models', 'raft-sintel.pth'),
                  raft_args={'test_mode': True, 'iters': 20},
                  flow_thresh=0.5,
-                 full_supervision=False
+                 full_supervision=False,
+                 single_supervision=False,
+                 mean=None,
+                 std=None
     ):
         self.training = training
         self.frame_idx = frame_idx
         self.delta_time = delta_time
 
         self.aff_r = aff_r
-        self.num_levels = num_levels
+        self.num_levels = aff_r
 
         meta_path = os.path.join(dataset_dir, 'meta.json')
         self.meta = json.loads(Path(meta_path).open().read())
@@ -262,9 +206,18 @@ class TdwAffinityDataset(Dataset):
                                                     'model_split_'+test_splits,
                                                     test_filepattern))
 
-        self.raft = self._load_raft(raft_ckpt)
-        self.raft_args = copy.deepcopy(raft_args)
+        self.precomputed_raft = False
+        if not (single_supervision or full_supervision):
+            self.raft = self._load_raft(raft_ckpt)
+            self.raft_args = copy.deepcopy(raft_args)
         self.flow_thresh = flow_thresh
+
+        ## normalizing
+        if (mean is not None) and (std is not None):
+            norm = transforms.Normalize(mean=mean, std=std)
+            self.normalize = lambda x: (norm(x.float() / 255.))
+        else:
+            self.normalize = lambda x: 2*(x.float() / 255.)-1
 
         ## resizing
         self.size = size
@@ -278,10 +231,13 @@ class TdwAffinityDataset(Dataset):
 
         ## how to get supervision inputs
         self.full_supervision = full_supervision
+        self.single_supervision = single_supervision
 
     def _load_raft(self, ckpt):
         if ckpt is None:
+            self.precomputed_raft = True
             return None
+        self.precomputed_raft = False
         raft = train.load_model(
             load_path=ckpt,
             small=False,
@@ -300,13 +256,14 @@ class TdwAffinityDataset(Dataset):
         pred_mask = (pred_flow.square().sum(-3).sqrt() > self.flow_thresh)
         if len(pred_mask.shape) == 3:
             pred_mask = pred_mask[0]
-        return pred_mask
+        return pred_mask.cpu()
 
-    def get_semantic_map(self, motion_mask):
+    def get_semantic_map(self, motion_mask, background_class=80):
         """Only two categories: foreground (i.e. moving or moveable) and background"""
         size = motion_mask.shape[-2:]
-        cats = torch.arange(2, dtype=torch.long, device=motion_mask.device).view(2,1,1)
-        return (cats == motion_mask.view(1, *size).long()).float()
+        fg = (motion_mask.long() == 1).view(1, *size)
+        return torch.cat([fg, torch.logical_not(fg)], 0).float()
+
 
     def __len__(self):
         return len(self.file_list)
@@ -323,23 +280,25 @@ class TdwAffinityDataset(Dataset):
         _, segment_map, gt_moving = self.process_segmentation_color(segment_colors, file_name)
 
         if self.full_supervision:
-            pass
-
-        self.precomputed_raft = False
-        if self.precomputed_raft:
-            pass
+            moving = (segment_map > 0)
+        elif self.precomputed_raft:
+            pred_flow = self.read_flow(file_name, size=self.size)
+            moving = (pred_flow.square().sum(-3).sqrt() > self.flow_thresh)
         elif self.raft is not None:
             moving = self.get_raft_mask(image_1, image_2)
         else:
+            assert self.single_supervision
+            # raise NotImplementedError("Don't use the GT moving object!")
             moving = gt_moving
 
         semantic = self.get_semantic_map(moving)
-        aff_target = self.get_affinity_target(moving)
+        aff_target = self.get_affinity_target(segment_map if self.full_supervision else moving)
 
-        return (self.resize(image_1), self.resize_labels(semantic), aff_target)
+        return (self.normalize(self.resize(image_1).float()), self.resize_labels(semantic), aff_target)
 
     def get_affinity_target(self, segments):
         assert len(segments.shape) == 2, segments.shape
+        segments = segments.long()
         segments = self.resize_labels(segments[None])[0] # [H,W] <long>
 
         aff_targets = torch.zeros((self.num_levels, self.aff_r**2, self.size[0], self.size[1])).float()
@@ -373,6 +332,15 @@ class TdwAffinityDataset(Dataset):
     def read_frame(path, frame_idx):
         image_path = os.path.join(path, format(frame_idx, '05d') + '.png')
         return read_image(image_path)
+
+    @staticmethod
+    def read_flow(path, size=[256,256]):
+        flow_path = path.replace('/images/', '/flows/') + '.pt'
+        try:
+            raft_flow = torch.load(flow_path)
+        except:
+            raft_flow = torch.zeros((2, *size))
+        return raft_flow.float()
 
     @staticmethod
     def _object_id_hash(objects, val=256, dtype=torch.long):

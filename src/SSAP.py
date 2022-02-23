@@ -126,7 +126,7 @@ class SSAP(nn.Module):
 
     """
 
-    def __init__(self, n_channels, n_classes, aff_r):
+    def __init__(self, n_channels, n_classes, aff_r, pretrained_backbone=True):
         """__init__
 
         Args:
@@ -136,7 +136,7 @@ class SSAP(nn.Module):
 
         """
         super(SSAP, self).__init__()
-        self.resnet = models.resnet34(pretrained=True)
+        self.resnet = models.resnet34(pretrained=pretrained_backbone)
         self.inc = DoubleConv(n_channels, 64)
         self.down = Down(512, 1024)
         self.up1 = Up(1024, 512)
