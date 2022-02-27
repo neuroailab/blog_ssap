@@ -259,7 +259,7 @@ def calc_js_div(p_, q_):
     return refine
 
 
-def make_ins_seg(outputs, b=0, st_for=0, en_for=5, min_size=5):
+def make_ins_seg(outputs, b=0, st_for=0, en_for=5, min_size=5, thresh=None):
     """make_ins_seg
 
          pixelをNode、AffinityをEdgeの重みとすることで、
@@ -297,9 +297,14 @@ def make_ins_seg(outputs, b=0, st_for=0, en_for=5, min_size=5):
 
     for mag in range(st_for, en_for):
         det_segment = outputs[mag].cpu().detach().numpy()[b]
-        back = det_segment.shape[0] - 1
-        cls_segment = np.argmax(det_segment, axis=0)
-        foreground = np.where(cls_segment != back, 1, 0)
+        if thresh is None:
+            back = det_segment.shape[0] - 1
+            cls_segment = np.argmax(det_segment, axis=0)
+            foreground = np.where(cls_segment != back, 1, 0)
+        else:
+            cls_segment = 1 - (det_segment[0] > thresh).astype(int)
+            back = np.where(cls_segment == 1, 1, 0)
+            foreground = np.where(cls_segment == 0, 1, 0)
         aff = outputs[mag+5].cpu().detach().numpy()[b]
 
         # 前層から引き継いだInstanceの数.

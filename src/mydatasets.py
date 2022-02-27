@@ -174,9 +174,9 @@ class TdwAffinityDataset(Dataset):
                  training=True,
                  size=[256, 256],
                  splits='[0-9]*',
-                 test_splits='[0-3]',
+                 test_splits='[0-3]', # trainval: 4
                  filepattern='*[0-8]',
-                 test_filepattern='*9',
+                 test_filepattern='*9', # trainval: "0*[0-4]"
                  delta_time=1,
                  frame_idx=5,
                  raft_ckpt=os.path.join(RAFT_DIR, 'models', 'raft-sintel.pth'),
@@ -185,7 +185,8 @@ class TdwAffinityDataset(Dataset):
                  full_supervision=False,
                  single_supervision=False,
                  mean=None,
-                 std=None
+                 std=None,
+                 is_test=False
     ):
         self.training = training
         self.frame_idx = frame_idx
@@ -232,6 +233,8 @@ class TdwAffinityDataset(Dataset):
         ## how to get supervision inputs
         self.full_supervision = full_supervision
         self.single_supervision = single_supervision
+
+        self.is_test = is_test
 
     def _load_raft(self, ckpt):
         if ckpt is None:
@@ -290,6 +293,9 @@ class TdwAffinityDataset(Dataset):
             assert self.single_supervision
             # raise NotImplementedError("Don't use the GT moving object!")
             moving = gt_moving
+
+        if self.is_test:
+            return (self.normalize(self.resize(image_1).float()), segment_map, gt_moving)
 
         semantic = self.get_semantic_map(moving)
         aff_target = self.get_affinity_target(segment_map if self.full_supervision else moving)
